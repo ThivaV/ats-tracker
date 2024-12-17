@@ -4,3 +4,7 @@
 #!/bin/bash
 kaggle datasets download snehaanbhawal/resume-dataset
 ```
+
+- 2485 files
+    - .pdf: 2484
+    - .csv: 1

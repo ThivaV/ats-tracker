@@ -7,3 +7,7 @@ matplotlib
 seaborn
 python-dotenv
 python-box
+pymilvus
+pymilvus[model]
+PyPDF2
+streamlit
