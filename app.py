@@ -57,13 +57,22 @@ if __name__ == "__main__":
             },
             hide_index=True,
             use_container_width=True,
-            on_select="rerun",
-            selection_mode=["single-row"],
+            # on_select="rerun",
+            # selection_mode=["single-row"],
         )
-        selection = event.selection        
-        selection_index = int(selection.rows[0])    
+        # selection = event.selection
+        # print(selection)
+        # if len(selection.rows) > 0:        
+        #     selection_index = int(selection.rows[0])
 
-        # st.write(ui_resumes[selection_index, "resume_uri"])
+        #     for index in range(selection_index+1):
+            
+        #     for index, row in ui_resumes.iterrows():
+        #         print("HERE1: ", index)
+        #         if selection_index == index:
+        #             print("HERE2: ", selection_index)
+
+        # # st.write(ui_resumes[selection_index, "resume_uri"])
     with col2:
         pdf_display = show_pdf("data/master_data/resumes/v1.0/AGRICULTURE/62994611.pdf")
         st.markdown(pdf_display, unsafe_allow_html=True)
