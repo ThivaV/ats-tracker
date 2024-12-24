@@ -162,4 +162,4 @@ cython_debug/
 .idea/
 
 *.db.lock
-# notebooks/=1.3.3
+.vscode/
