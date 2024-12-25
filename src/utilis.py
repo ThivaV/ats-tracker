@@ -1,103 +1,96 @@
+import json
 import pandas as pd
-from pymilvus import connections, Collection, AnnSearchRequest, WeightedRanker
-from pymilvus.model.hybrid import BGEM3EmbeddingFunction
+
+from pymilvus import connections, Collection, model, AnnSearchRequest, WeightedRanker
+from pymilvus.model.sparse import BM25EmbeddingFunction  # type: ignore
+from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer  # type: ignore
 
 
-class HandleATS:
+class ATSTracker:
     def __init__(
         self,
         resume_catalog_uri: str = None,
         milvusdb_uri: str = None,
         collection_name: str = None,
     ):
-        # milvus database connection string
+        self.resume_catalog_uri = resume_catalog_uri
         self.milvusdb_uri = milvusdb_uri
         self.collection_name = collection_name
-        self.resume_catalog_uri = resume_catalog_uri
 
         self.collection = None
-        self.bge_m3 = None
-        self.catalog_df = None
+        self.resumes_df = None
+
+        self.bm25_ef = None
+        self.sentence_transformer_ef = None
+        self.dense_dimension = 768
 
     def initialize_database(self):
-        # connect to milvus db
         connections.connect(uri=self.milvusdb_uri)
         self.collection = Collection(self.collection_name)
         self.collection.load()
 
-    def initialize_embedding(self):
-        # please set the use_fp16 to False when you are using cpu.
-        # by default the return options is:
-        #  return_dense True
-        #  return_sparse True
-        #  return_colbert_vecs False
-        self.bge_m3 = BGEM3EmbeddingFunction(
-            model_name="BAAI/bge-m3",  # specify the model name
+    def initialize_catalog(self):
+        self.resumes_df = pd.read_csv(self.resume_catalog_uri)
+
+    def initialize_sparse_embeddings(self):
+        analyzer = build_default_analyzer(language="en")
+        self.bm25_ef = BM25EmbeddingFunction(analyzer)
+
+        # fit the model on the corpus to get the statstics of the corpus
+        corpus = self.resumes_df["resume"].tolist()
+        self.bm25_ef.fit(corpus)
+
+    def generate_bm25_embedding(self, query):
+        bm25_csr_matrix = self.bm25_ef.encode_documents([query])
+        bm25_dict_embedding = {
+            idx: val for idx, val in zip(bm25_csr_matrix.indices, bm25_csr_matrix.data)
+        }
+        return bm25_dict_embedding
+
+    def initialize_dense_embeddings(self):
+        # initialize the SentenceTransformerEmbeddingFunction
+        self.sentence_transformer_ef = model.dense.SentenceTransformerEmbeddingFunction(
+            model_name="bert-base-uncased",  # specify the model name
             device="cpu",  # specify the device to use, e.g., 'cpu' or 'cuda:0'
-            use_fp16=False,  # specify whether to use fp16. Set to `False` if `device` is `cpu`.
         )
 
-    def initialize_catalog(self):
-        self.catalog_df = pd.read_csv(self.resume_catalog_uri)
+    def generate_dense_embedding(self, query):
+        return self.sentence_transformer_ef.encode_documents([query])[0]
 
-    def encode_documents(self, doc: str = None):
-        """BGE-M3 returns both dense and sparse encodings"""
-        embeddings = self.bge_m3.encode_documents([doc])
+    def search(self, query, sparse_weight=0.5, dense_weight=0.5, top_k=5):
+        dense_embedding = self.generate_dense_embedding(query)
+        request_1 = AnnSearchRequest(
+            [dense_embedding], "dense", {"metric_type": "IP", "params": {}}, limit=top_k
+        )
 
-        dense = embeddings["dense"][0]
-        sparse_list = list(embeddings["sparse"])
+        sparse_embedding = self.generate_bm25_embedding(query)
+        request_2 = AnnSearchRequest(
+            [sparse_embedding],
+            "sparse",
+            {"metric_type": "IP", "params": {}},
+            limit=top_k,
+        )
 
-        # convert csr matrix to dictionary
-        row_index = 0
-        sparse = {
-            idx: val
-            for idx, val in zip(
-                sparse_list[row_index].indices, sparse_list[row_index].data
-            )
-        }
+        reqs = [request_1, request_2]
+        ranker = WeightedRanker(sparse_weight, dense_weight)
 
-        return dense, sparse
+        results = self.collection.hybrid_search(
+            reqs=reqs,
+            rerank=ranker,
+            limit=top_k,
+            output_fields=["resume_id", "domain", "uri"],
+        )[0]
 
-    def search(
-        self,
-        query: str = None,
-        sparse_weight: float = 1.0,
-        dense_weight: float = 1.0,
-        limit: int = 10,
-    ) -> list[any]:
-        resumes = []
-        if query:
-            # fetch the dense & sprse encoding of query
-            dense_query_embeds, sparse_query_embeds = self.encode_documents(query)
-
-            # dense
-            dense_search_params = {"metric_type": "IP", "params": {}}
-            dense_req = AnnSearchRequest(
-                [dense_query_embeds], "dense_vector", dense_search_params, limit=limit
-            )
-
-            # sparse
-            sparse_search_params = {"metric_type": "IP", "params": {}}
-            sparse_req = AnnSearchRequest(
-                [sparse_query_embeds],
-                "sparse_vector",
-                sparse_search_params,
-                limit=limit,
-            )
-
-            # rerank
-            rerank = WeightedRanker(sparse_weight, dense_weight)
-            resp = self.collection.hybrid_search(
-                [sparse_req, dense_req],
-                rerank=rerank,
-                limit=limit,
-                output_fields=["id"],
-            )[0]
-
-            resumes = [hit.get("id") for hit in resp]
-        return resumes
-
-    def retrieve_resume_info(self, resumes: list) -> pd.DataFrame:
-        resumes = [int(resume) for resume in resumes]
-        filtered_resumes = self.catalog_df[self.catalog_df["resume_id"].isin(resumes)]
-        return filtered_resumes
+        if len(results) == 0:
+            return []
+        else:
+            results = [
+                {
+                    "distance": round(item.distance * 100, 2),
+                    "resume_id": item.get("resume_id"),
+                    "domain": item.get("domain"),
+                    "uri": item.get("uri"),
+                }
+                for item in results
+            ]
+            return json.dumps(results, indent=4)
